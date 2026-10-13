@@ -11,7 +11,7 @@ execute:
   warning: false
 ---
 
-```{r setup} 
+```{r setup}
 library(tidyverse)
 library(readxl)
 library(ggnewscale)  # permet 2 échelles de couleur (T et G) sur le même graph
