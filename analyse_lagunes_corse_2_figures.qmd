@@ -1,0 +1,337 @@
+---
+title: "Végétation aquatique des lagunes de Corse — Terrain, banque de graines et salinité"
+author: ""
+---
+
+```{r}
+#| label: setup
+library(tidyverse)
+library(readxl)
+library(here)
+library(ggforce)   # demi-lunes (geom_arc_bar)
+library(scales)
+
+theme_set(theme_minimal(base_size = 12))
+
+# Ordre des sites
+ordre_sites <- c("Del Sale", "Barcaghju", "Asciaghju", "Arje Vecchie", "Crovani")
+
+# Palier de salinité à exclure (non numérique / hors traitement)
+exclure_salinite <- c("Evol")
+```
+
+## 1. Import et harmonisation des données
+
+### 1.1 Import des fichiers
+
+```{r}
+#| label: import-fichiers
+Data_terrain_formate <- read_excel(here("Data", "Data_terrain_formate.xlsx"), sheet = 1)
+Corse_Seedbank       <- read_excel(here("Data", "Corse_Seedbank_Data_simplifie.xlsx"), sheet = 1)
+Data_salinity        <- read_excel(here("Data", "Data_salinity_corse.xlsx"), sheet = 1)
+```
+
+### 1.2 Fonctions de classement des espèces
+
+```{r}
+#| label: classer-genre
+classer_genre <- function(nom_espece) {
+  x <- str_to_lower(nom_espece)
+  case_when(
+    str_detect(x, "althenia") & !str_detect(x, "/")            ~ "Althenia",
+    str_detect(x, "ruppia")   & !str_detect(x, "/")             ~ "Ruppia",
+    str_detect(x, "chara|tolypella|lamprothamnium|characeae")   ~ "Characeae",
+    str_detect(x, "ranunculus")                                 ~ "Ranunculus",
+    str_detect(x, "riella")                                     ~ "Riella",
+    str_detect(x, "stuckenia")                                  ~ "Stuckenia",
+    str_detect(x, "zannichellia")                               ~ "Zannichellia",
+    TRUE                                                        ~ NA_character_
+  )
+}
+```
+
+```{r}
+#| label: classer-espece
+classer_espece <- function(nom_espece) {
+  x <- nom_espece |>
+    str_replace_all("_", " ") |>
+    str_squish()
+
+  genre_detecte <- case_when(
+    str_detect(str_to_lower(x), "althenia") & str_detect(x, "/") ~ NA_character_, # "Althenia/Ruppia" ambigu -> exclu
+    str_detect(str_to_lower(x), "althenia")       ~ "Althenia",
+    str_detect(str_to_lower(x), "ruppia")         ~ "Ruppia",
+    str_detect(str_to_lower(x), "characeae")      ~ "Characeae",
+    str_detect(str_to_lower(x), "^chara\\b")      ~ "Chara",
+    str_detect(str_to_lower(x), "tolypella")      ~ "Tolypella",
+    str_detect(str_to_lower(x), "lamprothamnium") ~ "Lamprothamnium",
+    str_detect(str_to_lower(x), "ranunculus")     ~ "Ranunculus",
+    str_detect(str_to_lower(x), "riella")         ~ "Riella",
+    str_detect(str_to_lower(x), "stuckenia")      ~ "Stuckenia",
+    str_detect(str_to_lower(x), "zannichellia")   ~ "Zannichellia",
+    TRUE ~ NA_character_
+  )
+
+  epithete <- str_trim(str_remove(x, "^[A-Za-z]+\\s*"))
+  epithete_valide <- !str_detect(str_to_lower(epithete), "^sp\\.?$|^spp\\.?$|^$")
+
+  if_else(
+    is.na(genre_detecte), NA_character_,
+    if_else(epithete_valide, paste(genre_detecte, epithete), genre_detecte)
+  )
+}
+```
+
+```{r}
+#| label: regrouper-espece-presence
+regrouper_espece_presence <- function(espece) {
+  case_when(
+    espece %in% c("Althenia", "Althenia filiformis")     ~ "Althenia filiformis",
+    espece %in% c("Ruppia", "Ruppia cirrhosa")            ~ "Ruppia cirrhosa",
+    espece == "Ruppia maritima"                           ~ "Ruppia maritima",
+    espece == "Ruppia drepanensis"                        ~ NA_character_,
+    espece == "Chara"                                     ~ NA_character_,
+    espece == "Chara aspera"                              ~ "Chara aspera",
+    espece == "Chara bizarre"                             ~ "Chara sp.",
+    espece == "Chara canescens"                           ~ "Chara canescens",
+    espece == "Chara vulgaris"                            ~ "Chara vulgaris",
+    espece == "Characeae"                                 ~ NA_character_,
+    espece == "Lamprothamnium"                            ~ "Lamprothamnium",
+    espece == "Ranunculus peltatus"                       ~ "Ranunculus peltatus",
+    espece == "Ranunculus trichophyllus"                  ~ "Ranunculus trichophyllus",
+    str_starts(espece, "Riella")                          ~ NA_character_,
+    espece %in% c("Stuckenia", "Stuckenia pectinata")     ~ "Stuckenia pectinata",
+    espece == "Tolypella"                                 ~ NA_character_,
+    espece == "Tolypella glomerata"                       ~ "Tolypella glomerata",
+    espece %in% c("Zannichellia", "Zannichellia palustris") ~ "Zannichellia palustris",
+    TRUE ~ espece 
+  )
+}
+```
+
+### 1.3 Données terrain (% de recouvrement)
+
+```{r}
+#| label: import-terrain
+terrain_brut <- Data_terrain_formate |>
+  rename(Site = `Lagune`, Releve = `Relevé`) |>
+  mutate(Site = str_trim(Site))
+```
+
+### 1.4 Données banque de graines
+
+```{r}
+#| label: import-seedbank
+
+correspondance_lagune <- tibble(
+  Lagune = c(1, 2, 3, 4, 5),
+  Site   = c("Crovani", "Barcaghju", "Arje Vecchie", "Del Sale", "Asciaghju")
+)
+
+seedbank_brut <- Corse_Seedbank |>
+  select(-Site) |>                      
+  mutate(Lagune = as.numeric(Lagune)) |>
+  left_join(correspondance_lagune, by = "Lagune")
+
+seedbank_long <- seedbank_brut |>
+  mutate(Genre = classer_genre(Sp_identifiees)) |>
+  filter(!is.na(Genre)) |>
+  
+  group_by(Site, Bac_Barquette, Genre) |>
+  summarise(nb_individus = sum(Nmbr_nouv_indiv, na.rm = TRUE), .groups = "drop")
+```
+
+### 1.5 Données salinité (manip) — dernière date uniquement
+
+```{r}
+#| label: import-salinity
+salinity_brut <- Data_salinity |>
+  select(-Site) |>                      
+  rename(Site = ID_LAG) |>             
+  mutate(Site = str_trim(Site))
+
+
+salinity_derniere_date <- salinity_brut |>
+  filter(!Salinite %in% exclure_salinite) |>
+  mutate(Salinite = as.numeric(Salinite)) |>
+  group_by(Bac_Barquette) |>
+  filter(Date == max(Date, na.rm = TRUE)) |>
+  ungroup()
+```
+
+## 2. Présence/absence : terrain vs manip
+
+```{r}
+#| label: presence-manip-espece
+terrain_espece_long <- terrain_brut |>
+  pivot_longer(-c(Site, Releve), names_to = "espece_brute", values_to = "recouvrement") |>
+  mutate(
+    Espece = classer_espece(espece_brute),
+    Espece = regrouper_espece_presence(Espece)
+  ) |>
+  filter(!is.na(Espece)) |>
+  group_by(Site, Releve, Espece) |>
+  summarise(recouvrement = sum(recouvrement, na.rm = TRUE), .groups = "drop")
+
+terrain_presence_espece <- terrain_espece_long |>
+  group_by(Site, Espece) |>
+  summarise(present = any(recouvrement > 0), .groups = "drop")
+
+salinity_espece_long <- salinity_derniere_date |>
+  pivot_longer(
+    -c(Date, Obs, Bac.x, Barquette.x, Bac_Barquette, Salinite, Site, CodeBarquette),
+    names_to = "espece_brute", values_to = "recouvrement"
+  ) |>
+  mutate(
+    Espece = classer_espece(espece_brute),
+    Genre  = classer_genre(espece_brute),
+    Espece = regrouper_espece_presence(Espece)
+  ) |>
+  filter(!is.na(Espece))
+
+salinity_presence_espece <- salinity_espece_long |>
+  group_by(Site, Espece) |>
+  summarise(present = any(recouvrement > 0), .groups = "drop")
+
+# Banque de graines : Riella compté seulement si un échantillon a >= 10 individus
+seedbank_presence_genre <- seedbank_long |>
+  mutate(echantillon_valide = if_else(Genre == "Riella", nb_individus >= 10, nb_individus > 0)) |>
+  group_by(Site, Genre) |>
+  summarise(present = any(echantillon_valide), .groups = "drop") |>
+  filter(present)
+
+# Renommage vers l'espèce fine seulement si une seule espèce en salinité (site x genre)
+nomenclature_fine_site <- salinity_espece_long |>
+  filter(recouvrement > 0, !is.na(Genre)) |>
+  distinct(Site, Genre, Espece) |>
+  group_by(Site, Genre) |>
+  summarise(
+    n_especes   = n_distinct(Espece),
+    espece_fine = if_else(n_especes == 1, first(Espece), NA_character_),
+    .groups = "drop"
+  )
+
+seedbank_presence_espece <- seedbank_presence_genre |>
+  left_join(nomenclature_fine_site, by = c("Site", "Genre")) |>
+  mutate(
+    Espece = if_else(!is.na(espece_fine), espece_fine, Genre),
+    Espece = regrouper_espece_presence(Espece)
+  ) |>
+  filter(!is.na(Espece)) |>
+  select(Site, Espece, present)
+
+# Manip = banque de graines OU salinité
+manip_presence_espece <- bind_rows(salinity_presence_espece, seedbank_presence_espece) |>
+  group_by(Site, Espece) |>
+  summarise(present = any(present), .groups = "drop")
+```
+
+```{r}
+#| label: fig-presence-absence
+#| fig-cap: "Presence/absence per species and site — field (left half) vs manipulation (right half: seed bank + salinity)"
+#| fig-width: 14
+#| fig-height: 7
+
+especes_presentes <- sort(unique(c(terrain_presence_espece$Espece, manip_presence_espece$Espece)))
+
+presence_totale <- bind_rows(
+  terrain_presence_espece |> mutate(Source = "Field"),
+  manip_presence_espece   |> mutate(Source = "Manip")
+) |>
+  complete(Site = ordre_sites, Espece = especes_presentes, Source,
+           fill = list(present = FALSE)) |>
+  mutate(
+    Site   = factor(Site, levels = rev(ordre_sites)),
+    Espece = factor(Espece, levels = especes_presentes),
+    x = as.numeric(Espece),
+    y = as.numeric(Site),
+    start = if_else(Source == "Field", pi, 0),
+    end   = if_else(Source == "Field", 2 * pi, pi)
+  )
+
+ggplot(presence_totale) +
+  geom_arc_bar(
+    aes(x0 = x, y0 = y, r0 = 0, r = 0.42, start = start, end = end, fill = present),
+    color = "grey30", linewidth = 0.4
+  ) +
+  geom_segment(aes(x = x, xend = x, y = y - 0.42, yend = y + 0.42),
+               color = "grey30", linewidth = 0.4) +
+  scale_fill_manual(values = c(`TRUE` = "black", `FALSE` = "white"),
+                     labels = c(`TRUE` = "Present", `FALSE` = "Absent"),
+                     name = NULL) +
+  scale_x_continuous(breaks = seq_along(especes_presentes), labels = especes_presentes,
+                      position = "top", expand = expansion(add = 0.6)) +
+  scale_y_continuous(breaks = seq_along(ordre_sites), labels = rev(ordre_sites),
+                      expand = expansion(add = 0.6)) +
+  coord_fixed() +
+  labs(x = NULL, y = "Sites",
+       caption = "Left half = Field   |   Right half = Experimentation") +
+  theme_minimal(base_size = 16) +
+  theme(
+    panel.grid = element_blank(),
+    axis.text.x = element_text(face = "italic", angle = 30, hjust = 0, vjust = 0,
+                                margin = margin(b = 2), size = 14),
+    axis.text.y = element_text(size = 15),
+    axis.title.y = element_text(size = 17, face = "bold"),
+    legend.text = element_text(size = 15),
+    legend.position = "bottom",
+    plot.caption = element_text(hjust = 0.5, size = 15, face = "bold")
+  )
+```
+
+## 3. Abondance terrain par espèce
+
+```{r}
+#| label: terrain-resume-espece
+terrain_espece_long_abondance <- terrain_brut |>
+  pivot_longer(-c(Site, Releve), names_to = "espece_brute", values_to = "recouvrement") |>
+  mutate(
+    Espece = classer_espece(espece_brute),
+    Espece = if_else(Espece == "Ruppia", "Ruppia cirrhosa", Espece) 
+  ) |>
+  filter(!is.na(Espece)) |>
+  group_by(Site, Releve, Espece) |>
+  summarise(recouvrement = sum(recouvrement, na.rm = TRUE), .groups = "drop")
+
+terrain_resume_espece <- terrain_espece_long_abondance |>
+  group_by(Site, Espece) |>
+  summarise(
+    moyenne = mean(recouvrement, na.rm = TRUE),
+    se = sd(recouvrement, na.rm = TRUE) / sqrt(n()),
+    n = n(),
+    .groups = "drop"
+  )
+```
+
+```{r}
+#| label: fig-abondance-terrain
+#| fig-cap: "Pourcentage de recouvrement moyen (± SE) par espèce et par site — données terrain"
+#| fig-width: 10
+#| fig-height: 9
+
+especes_terrain <- sort(unique(terrain_resume_espece$Espece))
+
+terrain_plot_df <- terrain_resume_espece |>
+  mutate(
+    Espece = factor(Espece, levels = especes_terrain),
+    Site = factor(Site, levels = rev(ordre_sites))
+  )
+
+ggplot(terrain_plot_df, aes(x = moyenne, y = Site)) +
+  geom_pointrange(aes(xmin = pmax(moyenne - se, 0), xmax = moyenne + se),
+                   color = "black", size = 0.4) +
+  facet_wrap(~Espece, ncol = 5, scales = "free_x") +
+  scale_x_continuous(limits = c(0, NA), breaks = scales::pretty_breaks(n = 4),
+                      expand = expansion(mult = c(0.08, 0.12))) +
+  labs(x = "% de recouvrement moyen ± SE", y = NULL) +
+  theme_bw(base_size = 11) +
+  theme(
+    strip.background = element_rect(fill = "grey85", color = "black"),
+    strip.text = element_text(face = "italic", color = "black"),
+    panel.border = element_rect(color = "black", fill = NA, linewidth = 0.5),
+    panel.grid.major.y = element_blank(),
+    panel.grid.minor = element_blank(),
+    panel.spacing = unit(1.2, "lines"),
+    axis.ticks = element_line(color = "black")
+  )
+```
