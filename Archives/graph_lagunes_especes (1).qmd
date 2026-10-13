@@ -1,0 +1,345 @@
+---
+title: "Présence et abondance des espèces par lagune"
+subtitle: "Recouvrement terrain (T) vs. germinations en banque de graines (G)"
+format:
+  html:
+    embed-resources: true
+    fig-width: 11
+    fig-height: 7
+execute:
+  echo: false
+  warning: false
+---
+
+```{r setup}
+library(tidyverse)
+library(readxl)
+library(ggnewscale)  # permet 2 échelles de couleur (T et G) sur le même graph
+library(scales)
+library(here)
+
+# ------------------------------------------------------------------
+# 0. CHEMINS DES FICHIERS — à adapter si besoin
+# ------------------------------------------------------------------
+path_terrain <- here("Data", "Data_terrain_formate.xlsx")
+path_germin  <- here("Data", "Data_salinity_corse.xlsx")
+```
+
+```{r species-lookup}
+# ------------------------------------------------------------------
+# Table d'harmonisation des noms d'espèces entre les 2 fichiers.
+#
+# Colonne 1 = nom tel qu'il apparaît dans Data_salinity_corse.xlsx
+# Colonne 2 = nom "de référence" à afficher sur le graphique
+
+# ------------------------------------------------------------------
+species_lookup <- tribble(
+  ~espece_germin,              ~espece_ref,
+  "Althenia filiformis",       "Althenia filiformis",
+  "Althenia/Ruppia",           "Althenia/Ruppia (indet.)",
+  "Ruppia sp.",                "Ruppia spp.",
+  "Ruppia maritima",           "Ruppia maritima",
+  "Ruppia cirrhosa",           "Ruppia cirrhosa",
+  "Ruppia drepanensis",        "Ruppia drepanensis",
+  "Ranunculus peltatus",       "Ranunculus peltatus",
+  "Characeae",                 "Characeae (indet.)",
+  "Tolypella sp.",             "Tolypella glomerata",
+  "Lamprothamnium",            "Lamprothamnium",
+  "Chara sp.",                 "Chara sp.",
+  "Chara canescens",           "Chara canescens",
+  "Chara vulgaris",            "Chara vulgaris",
+  "Chara aspera",              "Chara aspera",
+  "Chara bizarre",             "Chara bizarre",
+  "Riella sp",                 "Riella sp.",
+  "Riella helicophylla",       "Riella helicophylla",
+  "Riella notarisii",          "Riella notarisii",
+  "Riella cossoniana",         "Riella cossoniana",
+  "Bryophyte sp.",             "Bryophyte sp.",
+  "Zannichellia pedicellata",  "Zannichellia palustris",
+  "Cyperacea",                 "Cyperacea (indet.)",
+  "Stuckenia",                 "Stuckenia pectinata",
+  "Juncus sp.",                "Juncus sp."
+)
+
+# Correspondance code lagune (suffixe du CodeBarquette) -> nom complet
+lagune_lookup <- tribble(
+  ~code_lagune, ~Lagune,
+  "ARJE",       "Arje Vecchie",
+  "ASCIA",      "Asciaghju",
+  "BARCA",      "Barcaghju",
+  "CROVANI",    "Crovani",
+  "DEL_SALE",   "Del Sale"
+)
+```
+
+```{r read-terrain}
+# ------------------------------------------------------------------
+# 1. DONNÉES TERRAIN 
+terrain_raw <- read_excel(path_terrain)
+# Niveau "relevé" (1 ligne = 1 quadrat) : gardé à part car il sert aussi
+# au graphique moyenne +/- écart-type plus bas dans le document.
+terrain_replicates <- terrain_raw %>%
+  rename_with(str_trim) %>%                 # enlève les espaces parasites ("Lagune " -> "Lagune")
+  filter(!is.na(Lagune)) %>%
+  mutate(Lagune = str_trim(Lagune)) %>%
+  pivot_longer(
+    cols = -c(Lagune, `Relevé`),
+    names_to  = "Espece",
+    values_to = "Recouvrement"
+  ) %>%
+  mutate(
+    Espece = str_trim(Espece),
+    Recouvrement = as.numeric(Recouvrement)
+  ) %>%
+  left_join(species_lookup, by = c("Espece" = "espece_germin")) %>%
+  mutate(Espece = coalesce(espece_ref, Espece)) %>%       # renomme si trouvé dans la table
+  select(-espece_ref)
+
+terrain <- terrain_replicates %>%
+  group_by(Lagune, Espece) %>%
+  summarise(T = mean(Recouvrement, na.rm = TRUE), .groups = "drop") %>%
+  mutate(T = na_if(T, 0))
+```
+
+```{r read-germination}
+# ------------------------------------------------------------------
+# 2. DONNÉES DE GERMINATION -> G (nb moyen de germinations / échantillon)
+# ------------------------------------------------------------------
+germin_raw <- read_excel(path_germin, sheet = "Data_salinity_corse")
+# Colonnes d'espèces = tout ce qui suit CodeBarquette
+germin_long <- germin_raw %>%
+  filter(Site == "Corse") %>%
+  mutate(
+    code_lagune = str_remove(CodeBarquette, "^[^_]+_[^_]+_")  # retire "NN_XX_"
+  ) %>%
+  left_join(lagune_lookup, by = "code_lagune") %>%
+  filter(!is.na(Lagune)) %>%
+  pivot_longer(
+    cols = -c(Date, Obs, Bac.x, Barquette.x, Bac_Barquette, Salinite,
+              Site, ID_LAG, CodeBarquette, code_lagune, Lagune),
+    names_to  = "espece_germin",
+    values_to = "n_germin"
+  ) %>%
+  mutate(n_germin = replace_na(n_germin, 0)) %>%
+  left_join(species_lookup, by = "espece_germin") %>%
+  mutate(Espece = coalesce(espece_ref, espece_germin))
+
+germin_sample <- germin_long %>%
+  # si plusieurs colonnes d'origine pointent vers le même espece_ref,
+  # on les additionne au niveau de l'échantillon avant de moyenner
+  group_by(Lagune, Espece, CodeBarquette) %>%
+  summarise(n_germin = sum(n_germin, na.rm = TRUE), .groups = "drop")
+
+germination <- germin_sample %>%
+  group_by(Lagune, Espece) %>%
+  summarise(G = mean(n_germin, na.rm = TRUE), .groups = "drop")
+```
+
+```{r combine}
+# ------------------------------------------------------------------
+# 3. FUSION T + G, mise en forme longue pour ggplot
+# ------------------------------------------------------------------
+donnees <- full_join(terrain, germination, by = c("Lagune", "Espece"))
+
+# Ordre des lagunes (alphabétique par défaut, à personnaliser si besoin)
+ordre_lagunes <- sort(unique(donnees$Lagune))
+
+# Ordre des espèces : par recouvrement terrain décroissant (comme sur l'exemple)
+ordre_especes <- donnees %>%
+  group_by(Espece) %>%
+  summarise(score = sum(T, na.rm = TRUE)) %>%
+  arrange(desc(score)) %>%
+  pull(Espece)
+
+donnees <- donnees %>%
+  mutate(
+    Lagune = factor(Lagune, levels = ordre_lagunes),
+    Espece = factor(Espece, levels = rev(ordre_especes))
+  )
+
+# Grille complète (toutes les combinaisons Lagune x Espece), pour dessiner
+# les cases vides avec un contour même quand il n'y a pas de valeur
+grille_complete <- expand_grid(
+  Lagune = levels(donnees$Lagune),
+  Espece = levels(donnees$Espece),
+  Metric = c("T", "G")
+) %>%
+  mutate(
+    Lagune = factor(Lagune, levels = ordre_lagunes),
+    Espece = factor(Espece, levels = rev(ordre_especes))
+  )
+
+donnees_T <- donnees %>% filter(!is.na(T))
+donnees_G <- donnees %>% filter(!is.na(G))
+```
+
+```{r plot}
+#| fig-cap: "Recouvrement terrain (T) et germinations en banque de graines (G) par lagune et par espèce"
+
+ggplot() +
+  # ---- fond : grille complète, cases vides = blanc avec contour gris ----
+  geom_tile(
+    data = grille_complete,
+    aes(x = Metric, y = Espece),
+    fill = "white", color = "grey88", linewidth = 0.4
+  ) +
+
+  # ---- couche T (recouvrement terrain) : dégradé vert ----
+  geom_tile(
+    data = donnees_T,
+    aes(x = "T", y = Espece, fill = T),
+    color = "white", linewidth = 0.6
+  ) +
+  geom_text(
+    data = donnees_T,
+    aes(x = "T", y = Espece, label = round(T)),
+    size = 3, color = "grey15"
+  ) +
+  scale_fill_gradient(
+    low = "#f3faf6", high = "#0b6e4f",
+    name = "T — recouvrement terrain (%)",
+    limits = c(0, 100), oob = squish
+  ) +
+
+  # ---- nouvelle échelle de couleur pour G ----
+  new_scale_fill() +
+
+  # ---- couche G (germinations) : dégradé orange/rouge ----
+  geom_tile(
+    data = donnees_G,
+    aes(x = "G", y = Espece, fill = G),
+    color = "white", linewidth = 0.6
+  ) +
+  geom_text(
+    data = donnees_G,
+    aes(x = "G", y = Espece, label = round(G)),
+    size = 3, color = "grey15"
+  ) +
+  scale_fill_gradient(
+    low = "#fdf1e9", high = "#a6350e",
+    name = "G — nb de germinations / échantillon",
+    limits = c(0, NA)
+  ) +
+
+  facet_wrap(~Lagune, nrow = 1, strip.position = "top") +
+  coord_fixed() +
+  labs(x = NULL, y = NULL, title = NULL) +
+  theme_minimal(base_size = 12) +
+  theme(
+    panel.grid = element_blank(),
+    axis.text.x = element_text(face = "bold"),
+    axis.text.y = element_text(hjust = 1),
+    strip.text = element_text(face = "bold", size = 12),
+    panel.spacing.x = unit(1.2, "lines"),
+    legend.position = "bottom",
+    legend.title = element_text(size = 9),
+    legend.text = element_text(size = 8)
+  )
+```
+
+## Comparaison terrain vs banque de graines, par genre et par site
+
+Deuxième graphique, sur le modèle "1 panneau par genre / sites en ordonnée /
+1 point + barre d'erreur par méthode" : pour chaque genre, on affiche pour
+chaque lagune la moyenne ± écart-type du recouvrement terrain (points verts)
+et de l'abondance en banque de graines (points orange), calculés sur les
+répétitions (relevés terrain / échantillons de banque de graines).
+
+⚠️ Les deux métriques ne sont pas dans la même unité (% de recouvrement vs
+nombre de germinations par échantillon) : elles sont affichées sur le même
+axe pour comparer les *tendances* par site, pas les valeurs absolues.
+
+```{r genre-lookup}
+# ------------------------------------------------------------------
+# Regroupement par genre (comme "Ruppia", "Althenia", "Chara",
+# "Lamprothamnium" dans votre exemple). Par défaut, le genre est le
+# premier mot du nom d'espèce. Ajoutez une ligne ici pour forcer un
+# regroupement différent (ex. rattacher "Characeae (indet.)" à "Chara").
+# ------------------------------------------------------------------
+genre_lookup <- tribble(
+  ~Espece,               ~Genre,
+  # "Characeae (indet.)", "Chara",
+)
+
+extraire_genre <- function(espece) {
+  str_extract(espece, "^[A-Za-zÀ-ÿ]+")
+}
+
+especes_avec_genre <- function(df) {
+  df %>%
+    left_join(genre_lookup, by = "Espece") %>%
+    mutate(Genre = coalesce(Genre, extraire_genre(Espece)))
+}
+```
+
+```{r genre-stats}
+# ------------------------------------------------------------------
+# Terrain : on somme d'abord les espèces d'un même genre au sein de
+# chaque relevé, puis on calcule moyenne + écart-type sur l'ensemble
+# des relevés de la lagune.
+# ------------------------------------------------------------------
+terrain_genre <- terrain_replicates %>%
+  especes_avec_genre() %>%
+  group_by(Lagune, `Relevé`, Genre) %>%
+  summarise(valeur = sum(Recouvrement, na.rm = TRUE), .groups = "drop") %>%
+  group_by(Lagune, Genre) %>%
+  summarise(
+    moyenne = mean(valeur, na.rm = TRUE),
+    sd      = sd(valeur, na.rm = TRUE),
+    n       = n(),
+    .groups = "drop"
+  ) %>%
+  mutate(Metric = "Terrain")
+
+# ------------------------------------------------------------------
+# Banque de graines : même logique, au niveau de l'échantillon
+# (CodeBarquette) plutôt que du relevé.
+# ------------------------------------------------------------------
+germin_genre <- germin_sample %>%
+  especes_avec_genre() %>%
+  group_by(Lagune, CodeBarquette, Genre) %>%
+  summarise(valeur = sum(n_germin, na.rm = TRUE), .groups = "drop") %>%
+  group_by(Lagune, Genre) %>%
+  summarise(
+    moyenne = mean(valeur, na.rm = TRUE),
+    sd      = sd(valeur, na.rm = TRUE),
+    n       = n(),
+    .groups = "drop"
+  ) %>%
+  mutate(Metric = "Banque de graines")
+
+# Genres à afficher (mettre à NULL pour tous les afficher)
+genres_a_afficher <- c("Ruppia", "Althenia", "Chara", "Lamprothamnium")
+
+genre_donnees <- bind_rows(terrain_genre, germin_genre) %>%
+  { if (!is.null(genres_a_afficher)) filter(., Genre %in% genres_a_afficher) else . } %>%
+  mutate(
+    sd     = replace_na(sd, 0),                                 # n = 1 -> pas de sd calculable
+    Lagune = factor(Lagune, levels = ordre_lagunes),
+    Metric = factor(Metric, levels = c("Terrain", "Banque de graines"))
+  )
+```
+
+```{r genre-plot}
+#| fig-cap: "Recouvrement terrain vs abondance en banque de graines, par genre et par lagune (moyenne ± écart-type)"
+
+ggplot(genre_donnees, aes(x = moyenne, y = Lagune, color = Metric)) +
+  geom_errorbarh(
+    aes(xmin = pmax(moyenne - sd, 0), xmax = moyenne + sd),
+    height = 0.2, position = position_dodge(width = 0.5)
+  ) +
+  geom_point(position = position_dodge(width = 0.5), size = 2.2) +
+  facet_wrap(~Genre, nrow = 1, scales = "free_x") +
+  scale_color_manual(values = c("Terrain" = "#0b6e4f", "Banque de graines" = "#a6350e")) +
+  labs(
+    x = "Valeur moyenne (Terrain : % recouvrement · Banque de graines : nb germinations / échantillon)",
+    y = "Site",
+    color = NULL
+  ) +
+  theme_bw(base_size = 12) +
+  theme(
+    panel.grid.minor = element_blank(),
+    strip.text = element_text(face = "italic", size = 12),
+    legend.position = "bottom"
+  )
+```

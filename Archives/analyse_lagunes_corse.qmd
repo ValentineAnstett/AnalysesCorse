@@ -1,0 +1,517 @@
+---
+title: "Végétation aquatique des lagunes de Corse — Terrain, banque de graines et salinité"
+author: ""
+---
+
+
+```{r}
+#| label: setup
+library(tidyverse)
+library(readxl)
+library(janitor)
+library(ggforce)   # demi-lunes (geom_arc_bar)
+library(patchwork)  # assemblage de graphiques
+library(scales)
+library(here)
+
+theme_set(theme_minimal(base_size = 12))
+
+# Ordre des sites tel qu'utilisé dans le schéma fourni (Figure 1)
+ordre_sites <- c("Del Sale", "Barcaghju", "Asciaghju", "Arje Vecchie", "Crovani")
+
+# Palier de salinité à exclure du 2e graphique (non numérique / hors traitement)
+exclure_salinite <- c("Evol")
+```
+
+## 1. Import et harmonisation des données
+
+### 1.1 Fonction commune de classement par genre
+
+```{r}
+#| label: classer-genre
+classer_genre <- function(nom_espece) {
+  x <- str_to_lower(nom_espece)
+  case_when(
+    str_detect(x, "althenia") & !str_detect(x, "/")            ~ "Althenia",
+    str_detect(x, "ruppia")   & !str_detect(x, "/")             ~ "Ruppia",
+    str_detect(x, "chara|tolypella|lamprothamnium|characeae")   ~ "Characeae",
+    str_detect(x, "ranunculus")                                 ~ "Ranunculus",
+    str_detect(x, "riella")                                     ~ "Riella",
+    str_detect(x, "stuckenia")                                  ~ "Stuckenia",
+    str_detect(x, "zannichellia")                                ~ "Zannichellia",
+    TRUE                                                         ~ NA_character_
+  )
+}
+
+# Ordre des genres utilisé pour les facettes / colonnes des figures
+ordre_genres <- c("Althenia", "Characeae", "Ranunculus", "Riella",
+                   "Ruppia", "Stuckenia", "Zannichellia")
+
+
+Data_terrain_formate <- read_excel(here("Data", "Data_terrain_formate.xlsx"), sheet = 1)
+Corse_Seedbank       <- read_excel(here("Data", "Corse_Seedbank_Data_simplifie.xlsx"), sheet = 1)
+Data_salinity        <- read_excel(here("Data", "Data_salinity_corse.xlsx"), sheet = 1)
+```
+
+### 1.2 Données terrain (% de recouvrement)
+
+```{r}
+#| label: import-terrain
+terrain_brut <- Data_terrain_formate |>
+  rename(Site = `Lagune`, Releve = `Relevé`) |>
+  mutate(Site = str_trim(Site))
+
+terrain_long <- terrain_brut |>
+  pivot_longer(-c(Site, Releve), names_to = "espece", values_to = "recouvrement") |>
+  mutate(Genre = classer_genre(espece)) |>
+  filter(!is.na(Genre)) |>
+  group_by(Site, Releve, Genre) |>
+  summarise(recouvrement = sum(recouvrement, na.rm = TRUE), .groups = "drop")
+
+# Présence terrain (au moins 1 relevé avec recouvrement > 0)
+terrain_presence <- terrain_long |>
+  group_by(Site, Genre) |>
+  summarise(present = any(recouvrement > 0), .groups = "drop")
+
+# Moyenne / SE de recouvrement par site x genre (pour le graphique 2)
+terrain_resume <- terrain_long |>
+  group_by(Site, Genre) |>
+  summarise(
+    moyenne = mean(recouvrement, na.rm = TRUE),
+    se = sd(recouvrement, na.rm = TRUE) / sqrt(n()),
+    n = n(),
+    .groups = "drop"
+  )
+```
+
+### 1.3 Données banque de graines
+
+```{r}
+#| label: import-seedbank
+# Correspondance Lagune (numérique) -> Site (déduite de CodeBarquette, cf. note ci-dessus)
+correspondance_lagune <- tibble(
+  Lagune = c(1, 2, 3, 4, 5),
+  Site   = c("Crovani", "Barcaghju", "Arje Vecchie", "Del Sale", "Asciaghju")
+)
+
+seedbank_brut <- Corse_Seedbank |>
+  select(-Site) |>                      # on retire l'ancienne colonne Site (valeur "Corse" partout)
+  mutate(Lagune = as.numeric(Lagune)) |>
+  left_join(correspondance_lagune, by = "Lagune")
+
+seedbank_long <- seedbank_brut |>
+  mutate(Genre = classer_genre(Sp_identifiees)) |>
+  filter(!is.na(Genre)) |>
+  # total germé par bac/barquette x genre (cumul sur les dates d'observation)
+  group_by(Site, Bac_Barquette, Genre) |>
+  summarise(nb_individus = sum(Nmbr_nouv_indiv, na.rm = TRUE), .groups = "drop")
+
+# Présence banque de graines
+seedbank_presence <- seedbank_long |>
+  group_by(Site, Genre) |>
+  summarise(present = any(nb_individus > 0), .groups = "drop")
+
+# Moyenne / SE par site x genre (pour le graphique 2)
+seedbank_resume <- seedbank_long |>
+  group_by(Site, Genre) |>
+  summarise(
+    moyenne = mean(nb_individus, na.rm = TRUE),
+    se = sd(nb_individus, na.rm = TRUE) / sqrt(n()),
+    n = n(),
+    .groups = "drop"
+  )
+```
+
+### 1.4 Données salinité (manip)
+
+```{r}
+#| label: import-salinity
+salinity_brut <- Data_salinity |>
+  select(-Site) |>                      # on retire l'ancienne colonne Site (valeur "Corse" partout)
+  rename(Site = ID_LAG) |>              # ID_LAG contient le nom du site
+  mutate(Site = str_trim(Site))
+
+# On ne garde que la dernière date d'observation, par bac/barquette
+salinity_derniere_date <- salinity_brut |>
+  filter(!Salinite %in% exclure_salinite) |>
+  mutate(Salinite = as.numeric(Salinite)) |>
+  group_by(Bac_Barquette) |>
+  filter(Date == max(Date, na.rm = TRUE)) |>
+  ungroup()
+
+salinity_long <- salinity_derniere_date |>
+  pivot_longer(
+    -c(Date, Obs, Bac.x, Barquette.x, Bac_Barquette, Salinite, Site, CodeBarquette),
+    names_to = "espece", values_to = "recouvrement"
+  ) |>
+  mutate(Genre = classer_genre(espece)) |>
+  filter(!is.na(Genre)) |>
+  # regroupe les colonnes espèce -> genre (somme, au cas où plusieurs colonnes par genre)
+  group_by(Site, Bac_Barquette, Salinite, Genre) |>
+  summarise(recouvrement = sum(recouvrement, na.rm = TRUE), .groups = "drop")
+
+# Moyenne / SE par site x salinité x genre (% de recouvrement)
+salinity_resume <- salinity_long |>
+  group_by(Site, Salinite, Genre) |>
+  summarise(
+    moyenne = mean(recouvrement, na.rm = TRUE),
+    se = sd(recouvrement, na.rm = TRUE) / sqrt(n()),
+    n = n(),
+    .groups = "drop"
+  )
+```
+
+## 2. Graphique 1 — Présence/absence : terrain vs banque de graines (demi-lunes)
+
+
+```{r}
+#| label: fig-presence-absence
+#| fig-cap: "Présence/absence des espèces principales par site — terrain (moitié gauche) vs banque de graines (moitié droite)"
+#| fig-width: 9
+#| fig-height: 6
+
+genres_presents <- intersect(ordre_genres,
+                              union(terrain_presence$Genre, seedbank_presence$Genre))
+
+presence_totale <- bind_rows(
+  terrain_presence  |> mutate(Source = "Terrain"),
+  seedbank_presence |> mutate(Source = "Banque de graines")
+) |>
+  filter(Genre %in% genres_presents) |>
+  # toutes les combinaisons site x genre x source, absence par défaut si manquant
+  complete(Site = ordre_sites, Genre = genres_presents, Source,
+           fill = list(present = FALSE)) |>
+  mutate(
+    Site  = factor(Site, levels = rev(ordre_sites)),
+    Genre = factor(Genre, levels = genres_presents),
+    x = as.numeric(Genre),
+    y = as.numeric(Site),
+    # moitié gauche (terrain) : 180°->360° ; moitié droite (banque de graines) : 0°->180°
+    start = if_else(Source == "Terrain", pi, 0),
+    end   = if_else(Source == "Terrain", 2 * pi, pi)
+  )
+
+ggplot(presence_totale) +
+  geom_arc_bar(
+    aes(x0 = x, y0 = y, r0 = 0, r = 0.42, start = start, end = end, fill = present),
+    color = "grey30", linewidth = 0.3
+  ) +
+  # ligne verticale de séparation gauche/droite pour lisibilité
+  geom_segment(aes(x = x, xend = x, y = y - 0.42, yend = y + 0.42),
+               color = "grey30", linewidth = 0.3) +
+  scale_fill_manual(values = c(`TRUE` = "black", `FALSE` = "white"),
+                     labels = c(`TRUE` = "Présent", `FALSE` = "Absent"),
+                     name = NULL) +
+  scale_x_continuous(breaks = seq_along(genres_presents), labels = genres_presents,
+                      position = "top", expand = expansion(add = 0.6)) +
+  scale_y_continuous(breaks = seq_along(ordre_sites), labels = rev(ordre_sites),
+                      expand = expansion(add = 0.6)) +
+  coord_fixed() +
+  labs(x = "Espèces", y = "Sites",
+       caption = "Moitié gauche = Terrain   |   Moitié droite = Banque de graines") +
+  theme_minimal(base_size = 12) +
+  theme(
+    panel.grid = element_blank(),
+    axis.text.x = element_text(face = "italic"),
+    legend.position = "bottom",
+    plot.caption = element_text(hjust = 0.5, size = 11, face = "bold")
+  )
+```
+Ajouter les données manip salinité aussi 
+
+```{r}
+#| label: classer-espece
+classer_espece <- function(nom_espece) {
+  x <- nom_espece |>
+    str_replace_all("_", " ") |>
+    str_squish()
+
+  genre_detecte <- case_when(
+    str_detect(str_to_lower(x), "althenia") & str_detect(x, "/") ~ NA_character_, # "Althenia/Ruppia" ambigu -> exclu
+    str_detect(str_to_lower(x), "althenia")       ~ "Althenia",
+    str_detect(str_to_lower(x), "ruppia")         ~ "Ruppia",
+    str_detect(str_to_lower(x), "characeae")      ~ "Characeae",
+    str_detect(str_to_lower(x), "^chara\\b")      ~ "Chara",
+    str_detect(str_to_lower(x), "tolypella")      ~ "Tolypella",
+    str_detect(str_to_lower(x), "lamprothamnium") ~ "Lamprothamnium",
+    str_detect(str_to_lower(x), "ranunculus")     ~ "Ranunculus",
+    str_detect(str_to_lower(x), "riella")         ~ "Riella",
+    str_detect(str_to_lower(x), "stuckenia")      ~ "Stuckenia",
+    str_detect(str_to_lower(x), "zannichellia")   ~ "Zannichellia",
+    TRUE ~ NA_character_
+  )
+
+  # épithète = ce qui suit le nom de genre dans la chaîne d'origine
+  epithete <- str_trim(str_remove(x, "^[A-Za-z]+\\s*"))
+  epithete_valide <- !str_detect(str_to_lower(epithete), "^sp\\.?$|^spp\\.?$|^$")
+
+  if_else(
+    is.na(genre_detecte), NA_character_,
+    if_else(epithete_valide, paste(genre_detecte, epithete), genre_detecte)
+  )
+}
+```
+
+```{r}
+#| label: regrouper-espece-presence
+regrouper_espece_presence <- function(espece) {
+  case_when(
+    espece %in% c("Althenia", "Althenia filiformis")     ~ "Althenia filiformis",
+    espece %in% c("Ruppia", "Ruppia cirrhosa")            ~ "Ruppia cirrhosa",
+    espece == "Ruppia maritima"                           ~ "Ruppia maritima",
+    espece == "Ruppia drepanensis"                        ~ NA_character_,
+    espece == "Chara"                                     ~ NA_character_,
+    espece == "Chara aspera"                              ~ "Chara aspera",
+    espece == "Chara bizarre"                             ~ "Chara sp.",
+    espece == "Chara canescens"                           ~ "Chara canescens",
+    espece == "Chara vulgaris"                            ~ "Chara vulgaris",
+    espece == "Characeae"                                 ~ NA_character_,
+    espece == "Lamprothamnium"                            ~ "Lamprothamnium",
+    espece == "Ranunculus peltatus"                       ~ "Ranunculus peltatus",
+    espece == "Ranunculus trichophyllus"                  ~ "Ranunculus trichophyllus",
+    str_starts(espece, "Riella")                          ~ NA_character_,
+    espece %in% c("Stuckenia", "Stuckenia pectinata")     ~ "Stuckenia pectinata",
+    espece == "Tolypella"                                 ~ NA_character_,
+    espece == "Tolypella glomerata"                       ~ "Tolypella glomerata",
+    espece %in% c("Zannichellia", "Zannichellia palustris") ~ "Zannichellia palustris",
+    TRUE ~ espece  # non listé -> conservé tel quel par sécurité
+  )
+}
+```
+
+
+```{r}
+#| label: presence-manip-espece
+terrain_espece_long <- terrain_brut |>
+  pivot_longer(-c(Site, Releve), names_to = "espece_brute", values_to = "recouvrement") |>
+  mutate(
+    Espece = classer_espece(espece_brute),
+    Espece = regrouper_espece_presence(Espece)
+  ) |>
+  filter(!is.na(Espece)) |>
+  group_by(Site, Releve, Espece) |>
+  summarise(recouvrement = sum(recouvrement, na.rm = TRUE), .groups = "drop")
+
+terrain_presence_espece <- terrain_espece_long |>
+  group_by(Site, Espece) |>
+  summarise(present = any(recouvrement > 0), .groups = "drop")
+
+salinity_espece_long <- salinity_derniere_date |>
+  pivot_longer(
+    -c(Date, Obs, Bac.x, Barquette.x, Bac_Barquette, Salinite, Site, CodeBarquette),
+    names_to = "espece_brute", values_to = "recouvrement"
+  ) |>
+  mutate(
+    Espece = classer_espece(espece_brute),
+    Genre  = classer_genre(espece_brute),
+    Espece = regrouper_espece_presence(Espece)
+  ) |>
+  filter(!is.na(Espece))
+
+salinity_presence_espece <- salinity_espece_long |>
+  group_by(Site, Espece) |>
+  summarise(present = any(recouvrement > 0), .groups = "drop")
+
+seedbank_presence_genre <- seedbank_long |>
+  mutate(echantillon_valide = if_else(Genre == "Riella", nb_individus >= 10, nb_individus > 0)) |>
+  group_by(Site, Genre) |>
+  summarise(present = any(echantillon_valide), .groups = "drop") |>
+  filter(present)
+
+nomenclature_fine_site <- salinity_espece_long |>
+  filter(recouvrement > 0, !is.na(Genre)) |>
+  distinct(Site, Genre, Espece) |>
+  group_by(Site, Genre) |>
+  summarise(
+    n_especes   = n_distinct(Espece),
+    espece_fine = if_else(n_especes == 1, first(Espece), NA_character_),
+    .groups = "drop"
+  )
+
+seedbank_presence_espece <- seedbank_presence_genre |>
+  left_join(nomenclature_fine_site, by = c("Site", "Genre")) |>
+  mutate(
+    Espece = if_else(!is.na(espece_fine), espece_fine, Genre),
+    Espece = regrouper_espece_presence(Espece)
+  ) |>
+  filter(!is.na(Espece)) |>
+  select(Site, Espece, present)
+
+manip_presence_espece <- bind_rows(salinity_presence_espece, seedbank_presence_espece) |>
+  group_by(Site, Espece) |>
+  summarise(present = any(present), .groups = "drop")
+```
+
+Graph mis à jour 
+
+```{r}
+#| label: fig-presence-absence
+#| fig-cap: "Presence/absence per species and site — field (left half) vs manipulation (right half: seed bank + salinity)"
+#| fig-width: 14
+#| fig-height: 7
+
+especes_presentes <- sort(unique(c(terrain_presence_espece$Espece, manip_presence_espece$Espece)))
+
+presence_totale <- bind_rows(
+  terrain_presence_espece |> mutate(Source = "Field"),
+  manip_presence_espece   |> mutate(Source = "Manip")
+) |>
+  complete(Site = ordre_sites, Espece = especes_presentes, Source,
+           fill = list(present = FALSE)) |>
+  mutate(
+    Site   = factor(Site, levels = rev(ordre_sites)),
+    Espece = factor(Espece, levels = especes_presentes),
+    x = as.numeric(Espece),
+    y = as.numeric(Site),
+    start = if_else(Source == "Field", pi, 0),
+    end   = if_else(Source == "Field", 2 * pi, pi)
+  )
+
+ggplot(presence_totale) +
+  geom_arc_bar(
+    aes(x0 = x, y0 = y, r0 = 0, r = 0.42, start = start, end = end, fill = present),
+    color = "grey30", linewidth = 0.4
+  ) +
+  geom_segment(aes(x = x, xend = x, y = y - 0.42, yend = y + 0.42),
+               color = "grey30", linewidth = 0.4) +
+  scale_fill_manual(values = c(`TRUE` = "black", `FALSE` = "white"),
+                     labels = c(`TRUE` = "Present", `FALSE` = "Absent"),
+                     name = NULL) +
+  scale_x_continuous(breaks = seq_along(especes_presentes), labels = especes_presentes,
+                      position = "top", expand = expansion(add = 0.6)) +
+  scale_y_continuous(breaks = seq_along(ordre_sites), labels = rev(ordre_sites),
+                      expand = expansion(add = 0.6)) +
+  coord_fixed() +
+  labs(x = NULL, y = "Sites",
+       caption = "Left half = Field   |   Right half = Experimentation") +
+  theme_minimal(base_size = 16) +
+  theme(
+    panel.grid = element_blank(),
+    axis.text.x = element_text(face = "italic", angle = 30, hjust = 0, vjust = 0,
+                                margin = margin(b = 2), size = 14),
+    axis.text.y = element_text(size = 15),
+    axis.title.y = element_text(size = 17, face = "bold"),
+    legend.text = element_text(size = 15),
+    legend.position = "bottom",
+    plot.caption = element_text(hjust = 0.5, size = 15, face = "bold")
+  )
+```
+
+
+## 3. Graphique 2 — Abondance par espèce 
+
+### 3.1 Panneau A — Terrain vs manip salinité 
+
+```{r}
+#| label: fig-abondance-espece
+#| fig-cap: "Pourcentage de recouvrement par espèce et par site — terrain vs modalités de salinité (manip)"
+#| fig-width: 12
+#| fig-height: 10
+
+# Recouvrement terrain, par site
+terrain_plot_df <- terrain_resume |>
+  filter(Genre %in% genres_presents) |>
+  mutate(
+    Genre = factor(Genre, levels = genres_presents),
+    Site = factor(Site, levels = ordre_sites),
+    categorie = "Terrain"
+  ) |>
+  select(Site, Genre, categorie, moyenne, se)
+
+# Recouvrement salinité, par site ET par modalité de salinité
+salinity_plot_df <- salinity_resume |>
+  filter(Genre %in% genres_presents) |>
+  mutate(
+    Genre = factor(Genre, levels = genres_presents),
+    Site = factor(Site, levels = ordre_sites),
+    categorie = paste0(Salinite, " g/L")
+  ) |>
+  select(Site, Genre, categorie, moyenne, se)
+
+# Ordre des catégories dans chaque panneau : Terrain, puis salinités croissantes
+ordre_categories <- c("Terrain", paste0(sort(unique(salinity_resume$Salinite)), " g/L"))
+
+abondance_df <- bind_rows(terrain_plot_df, salinity_plot_df) |>
+  mutate(
+    categorie = factor(categorie, levels = rev(ordre_categories)),
+    type = if_else(categorie == "Terrain", "Terrain", "Salinité (manip)")
+  )
+
+ggplot(abondance_df, aes(x = moyenne, y = categorie, color = type)) +
+  geom_pointrange(aes(xmin = pmax(moyenne - se, 0), xmax = moyenne + se), size = 0.35) +
+  facet_grid(Site ~ Genre, scales = "free_x", switch = "y") +
+  scale_color_manual(values = c("Terrain" = "#1b7837", "Salinité (manip)" = "#d95f02"),
+                      name = NULL) +
+  labs(x = "% de recouvrement moyen ± SE", y = NULL) +
+  theme_bw(base_size = 10) +
+  theme(
+    strip.background = element_rect(fill = "grey85", color = "black"),
+    strip.text.x = element_text(face = "italic", color = "black"),
+    strip.text.y.left = element_text(angle = 0, color = "black"),
+    strip.placement = "outside",
+    panel.border = element_rect(color = "black", fill = NA, linewidth = 0.5),
+    panel.spacing = unit(1, "lines"),
+    panel.grid.minor = element_blank(),
+    legend.position = "bottom",
+    axis.ticks = element_line(color = "black")
+  )
+```
+
+### 3.2 Panneau A — Terrain
+```{r}
+#| label: terrain-resume-espece
+terrain_espece_long_abondance <- terrain_brut |>
+  pivot_longer(-c(Site, Releve), names_to = "espece_brute", values_to = "recouvrement") |>
+  mutate(
+    Espece = classer_espece(espece_brute),
+    Espece = if_else(Espece == "Ruppia", "Ruppia cirrhosa", Espece)  # Ruppia spp. -> Ruppia cirrhosa
+  ) |>
+  filter(!is.na(Espece)) |>
+  group_by(Site, Releve, Espece) |>
+  summarise(recouvrement = sum(recouvrement, na.rm = TRUE), .groups = "drop")
+
+terrain_resume_espece <- terrain_espece_long_abondance |>
+  group_by(Site, Espece) |>
+  summarise(
+    moyenne = mean(recouvrement, na.rm = TRUE),
+    se = sd(recouvrement, na.rm = TRUE) / sqrt(n()),
+    n = n(),
+    .groups = "drop"
+  )
+```
+
+```{r}
+#| label: fig-abondance-terrain
+#| fig-cap: "Pourcentage de recouvrement moyen (± SE) par espèce et par site — données terrain"
+#| fig-width: 10
+#| fig-height: 9
+
+especes_terrain <- sort(unique(terrain_resume_espece$Espece))
+
+terrain_plot_df <- terrain_resume_espece |>
+  mutate(
+    Espece = factor(Espece, levels = especes_terrain),
+    Site = factor(Site, levels = rev(ordre_sites))
+  )
+
+ggplot(terrain_plot_df, aes(x = moyenne, y = Site)) +
+  geom_pointrange(aes(xmin = pmax(moyenne - se, 0), xmax = moyenne + se),
+                   color = "black", size = 0.4) +
+  facet_wrap(~Espece, ncol = 5, scales = "free_x") +
+  scale_x_continuous(limits = c(0, NA), breaks = scales::pretty_breaks(n = 4),
+                      expand = expansion(mult = c(0.08, 0.12))) +
+  labs(x = "% de recouvrement moyen ± SE", y = NULL) +
+  theme_bw(base_size = 11) +
+  theme(
+    strip.background = element_rect(fill = "grey85", color = "black"),
+    strip.text = element_text(face = "italic", color = "black"),
+    panel.border = element_rect(color = "black", fill = NA, linewidth = 0.5),
+    panel.grid.major.y = element_blank(),
+    panel.grid.minor = element_blank(),
+    panel.spacing = unit(1.2, "lines"),
+    axis.ticks = element_line(color = "black")
+  )
+```
+
+
+
