@@ -232,16 +232,42 @@ manip_presence_espece <- bind_rows(salinity_presence_espece, seedbank_presence_e
 #| fig-width: 14
 #| fig-height: 7
 
-especes_presentes <- sort(unique(c(terrain_presence_espece$Espece, manip_presence_espece$Espece)))
+# Espèces, de gauche à droite
+ordre_especes_presence <- c(
+   "Ranunculus trichophyllus", 
+   "Zannichellia palustris", 
+  "Ranunculus peltatus",  
+  "Chara vulgaris",   
+  "Chara aspera",
+  "Stuckenia pectinata",        
+  "Chara canescens", 
+  "Tolypella glomerata", 
+   "Althenia filiformis", 
+  "Ruppia maritima",           
+  "Ruppia cirrhosa",            
+  "Lamprothamnium"       
+)
+
+# Sites, de haut en bas
+ordre_sites_presence <- c("Del Sale", "Barcaghju", "Arje Vecchie", "Asciaghju", "Crovani")
+
+
+especes_dans_donnees <- unique(c(terrain_presence_espece$Espece, manip_presence_espece$Espece))
+
+# Les espèces de la liste d'abord (dans l'ordre choisi), puis celles non listées à la fin
+especes_presentes <- c(
+  intersect(ordre_especes_presence, especes_dans_donnees),
+  sort(setdiff(especes_dans_donnees, ordre_especes_presence))
+)
 
 presence_totale <- bind_rows(
   terrain_presence_espece |> mutate(Source = "Field"),
   manip_presence_espece   |> mutate(Source = "Manip")
 ) |>
-  complete(Site = ordre_sites, Espece = especes_presentes, Source,
+  complete(Site = ordre_sites_presence, Espece = especes_presentes, Source,
            fill = list(present = FALSE)) |>
   mutate(
-    Site   = factor(Site, levels = rev(ordre_sites)),
+    Site   = factor(Site, levels = rev(ordre_sites_presence)),
     Espece = factor(Espece, levels = especes_presentes),
     x = as.numeric(Espece),
     y = as.numeric(Site),
@@ -261,7 +287,7 @@ ggplot(presence_totale) +
                      name = NULL) +
   scale_x_continuous(breaks = seq_along(especes_presentes), labels = especes_presentes,
                       position = "top", expand = expansion(add = 0.6)) +
-  scale_y_continuous(breaks = seq_along(ordre_sites), labels = rev(ordre_sites),
+  scale_y_continuous(breaks = seq_along(ordre_sites_presence), labels = rev(ordre_sites_presence),
                       expand = expansion(add = 0.6)) +
   coord_fixed() +
   labs(x = NULL, y = "Sites",
@@ -309,12 +335,22 @@ terrain_resume_espece <- terrain_espece_long_abondance |>
 #| fig-width: 10
 #| fig-height: 9
 
-especes_terrain <- sort(unique(terrain_resume_espece$Espece))
+# Ordre des panneaux : ligne 1 puis ligne 2 (5 par ligne)
+ordre_panneaux <- c(
+  "Ranunculus trichophyllus", "Zannichellia palustris", "Ranunculus peltatus",
+  "Chara aspera", "Stuckenia pectinata",
+  "Ruppia maritima", "Althenia filiformis", "Chara canescens",
+  "Tolypella glomerata", "Ruppia cirrhosa"
+)
+
+# Ordre des sites de haut en bas pour ce graphique
+ordre_sites_terrain <- c("Del Sale", "Barcaghju", "Arje Vecchie", "Asciaghju", "Crovani")
 
 terrain_plot_df <- terrain_resume_espece |>
+  filter(Espece %in% ordre_panneaux) |>
   mutate(
-    Espece = factor(Espece, levels = especes_terrain),
-    Site = factor(Site, levels = rev(ordre_sites))
+    Espece = factor(Espece, levels = ordre_panneaux),
+    Site = factor(Site, levels = rev(ordre_sites_terrain))
   )
 
 ggplot(terrain_plot_df, aes(x = moyenne, y = Site)) +
